@@ -6,25 +6,25 @@ describe('UnityImageResolver', () => {
     jest.restoreAllMocks();
   });
 
-  it('selects the closest lower Unity minor version', () => {
+  it('selects the closest lower Unity version', () => {
     const requestedVersion = '2022.3.20f1';
     const availableVersions = ['2022.3.19f1', '2022.2.21f1', '2021.3.33f1', '2022.1.24f1'];
 
-    const fallback = UnityImageResolver.selectClosestLowerMinorVersion(requestedVersion, availableVersions);
+    const fallback = UnityImageResolver.selectClosestDowngradeVersion(requestedVersion, availableVersions);
 
-    expect(fallback).toStrictEqual('2022.2.21f1');
+    expect(fallback).toStrictEqual('2022.3.19f1');
   });
 
-  it('returns undefined when only same-minor patch versions exist', () => {
+  it('returns undefined when no lower version exists', () => {
     const requestedVersion = '2022.3.20f1';
-    const availableVersions = ['2022.3.19f1', '2022.3.18f1'];
+    const availableVersions = ['2022.3.21f1', '2023.1.0f1'];
 
-    const fallback = UnityImageResolver.selectClosestLowerMinorVersion(requestedVersion, availableVersions);
+    const fallback = UnityImageResolver.selectClosestDowngradeVersion(requestedVersion, availableVersions);
 
     expect(fallback).toBeUndefined();
   });
 
-  it('falls back to a lower minor image when exact tag does not exist', async () => {
+  it('falls back to the closest lower image when exact tag does not exist', async () => {
     const buildParameters = {
       customImage: '',
       containerRegistryRepository: 'unityci/editor',
@@ -41,8 +41,8 @@ describe('UnityImageResolver', () => {
       'unityci/editor:ubuntu-2022.3.20f1-linux-il2cpp-3',
     );
 
-    expect(result.image).toStrictEqual('unityci/editor:ubuntu-2022.2.21f1-linux-il2cpp-3');
-    expect(result.editorVersion).toStrictEqual('2022.2.21f1');
+    expect(result.image).toStrictEqual('unityci/editor:ubuntu-2022.3.19f1-linux-il2cpp-3');
+    expect(result.editorVersion).toStrictEqual('2022.3.19f1');
   });
 
   it('keeps the original image when exact tag exists', async () => {

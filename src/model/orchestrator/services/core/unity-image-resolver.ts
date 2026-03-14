@@ -31,7 +31,9 @@ type ParsedImageReference = {
 
 class UnityImageResolver {
   private static readonly requestTimeoutMs = 4_000;
-  private static readonly maxTagPages = 50;
+  private static readonly maxPagesExact = 2;
+  private static readonly maxPagesMinor = 10;
+  private static readonly maxPagesMajor = 20;
   private static readonly streamOrder: Record<string, number> = {
     a: 0,
     b: 1,
@@ -71,12 +73,13 @@ class UnityImageResolver {
         platformPrefix,
         builderPlatform,
         rollingVersion,
+        editorVersion,
       );
 
-      const fallbackVersion = this.selectClosestLowerMinorVersion(editorVersion, availableVersions);
+      const fallbackVersion = this.selectClosestDowngradeVersion(editorVersion, availableVersions);
       if (!fallbackVersion) {
         OrchestratorLogger.log(
-          `Unity image ${baseImage} was not found in Docker Hub and no lower Unity minor version was available`,
+          `Unity image ${baseImage} was not found in Docker Hub and no lower compatible Unity version was available`,
         );
         return { image: baseImage, editorVersion: buildParameters.editorVersion };
       }
@@ -92,7 +95,7 @@ class UnityImageResolver {
     }
   }
 
-  static selectClosestLowerMinorVersion(requestedVersion: string, availableVersions: string[]): string | undefined {
+  static selectClosestDowngradeVersion(requestedVersion: string, availableVersions: string[]): string | undefined {
     const requested = this.parseUnityVersion(requestedVersion);
     if (!requested) {
       return undefined;
@@ -104,12 +107,7 @@ class UnityImageResolver {
         if (!candidate) {
           return false;
         }
-
-        if (candidate.major < requested.major) {
-          return true;
-        }
-
-        return candidate.major === requested.major && candidate.minor < requested.minor;
+        return this.compareUnityVersionParts(candidate, requested) < 0;
       })
       .sort((a, b) => this.compareUnityVersions(b, a));
 
@@ -144,18 +142,60 @@ class UnityImageResolver {
     platformPrefix: string,
     builderPlatform: string,
     rollingVersion: number,
+    requestedVersion: string,
   ): Promise<string[]> {
-    const cacheKey = `${repository}|${platformPrefix}|${builderPlatform}|${rollingVersion}`;
+    const cacheKey = `${repository}|${platformPrefix}|${builderPlatform}|${rollingVersion}|${requestedVersion}`;
     const cached = this.versionCache.get(cacheKey);
     if (cached) {
       return cached;
     }
 
-    let url: string | null = `https://hub.docker.com/v2/repositories/${repository}/tags?page_size=100`;
+    const requested = this.parseUnityVersion(requestedVersion);
+    if (!requested) {
+      return [];
+    }
+
     const versions = new Set<string>();
+    const contexts = [
+      { filter: `${platformPrefix}-${requestedVersion}`, maxPages: this.maxPagesExact },
+      { filter: `${platformPrefix}-${requested.major}.${requested.minor}.`, maxPages: this.maxPagesMinor },
+      { filter: `${platformPrefix}-${requested.major}.`, maxPages: this.maxPagesMajor },
+    ];
+
+    for (const context of contexts) {
+      const contextVersions = await this.listMatchingUnityVersionsForFilter(
+        repository,
+        platformPrefix,
+        builderPlatform,
+        rollingVersion,
+        context.filter,
+        context.maxPages,
+      );
+      for (const version of contextVersions) {
+        versions.add(version);
+      }
+    }
+
+    const collected = [...versions];
+    this.versionCache.set(cacheKey, collected);
+    return collected;
+  }
+
+  private static async listMatchingUnityVersionsForFilter(
+    repository: string,
+    platformPrefix: string,
+    builderPlatform: string,
+    rollingVersion: number,
+    nameFilter: string,
+    maxPages: number,
+  ): Promise<string[]> {
+    const versions = new Set<string>();
+    let url: string | null = `https://hub.docker.com/v2/repositories/${repository}/tags?page_size=100&name=${encodeURIComponent(
+      nameFilter,
+    )}`;
     let pagesRead = 0;
 
-    while (url && pagesRead < this.maxTagPages) {
+    while (url && pagesRead < maxPages) {
       const response: { statusCode: number; body: DockerHubTagListResponse | null } =
         await this.getJson<DockerHubTagListResponse>(url);
       if (response.statusCode < 200 || response.statusCode >= 300 || !response.body) {
@@ -183,13 +223,11 @@ class UnityImageResolver {
 
     if (url) {
       OrchestratorLogger.log(
-        `Unity image lookup reached page limit (${this.maxTagPages}) while scanning ${repository}`,
+        `Unity image lookup reached page limit (${maxPages}) while scanning ${repository} with filter ${nameFilter}`,
       );
     }
 
-    const collected = [...versions];
-    this.versionCache.set(cacheKey, collected);
-    return collected;
+    return [...versions];
   }
 
   private static composeTag(
@@ -258,25 +296,29 @@ class UnityImageResolver {
       return 0;
     }
 
-    if (parsedA.major !== parsedB.major) {
-      return parsedA.major - parsedB.major;
+    return this.compareUnityVersionParts(parsedA, parsedB);
+  }
+
+  private static compareUnityVersionParts(a: UnityVersionParts, b: UnityVersionParts): number {
+    if (a.major !== b.major) {
+      return a.major - b.major;
     }
 
-    if (parsedA.minor !== parsedB.minor) {
-      return parsedA.minor - parsedB.minor;
+    if (a.minor !== b.minor) {
+      return a.minor - b.minor;
     }
 
-    if (parsedA.patch !== parsedB.patch) {
-      return parsedA.patch - parsedB.patch;
+    if (a.patch !== b.patch) {
+      return a.patch - b.patch;
     }
 
-    const streamOrderA = this.streamOrder[parsedA.stream] ?? 99;
-    const streamOrderB = this.streamOrder[parsedB.stream] ?? 99;
+    const streamOrderA = this.streamOrder[a.stream] ?? 99;
+    const streamOrderB = this.streamOrder[b.stream] ?? 99;
     if (streamOrderA !== streamOrderB) {
       return streamOrderA - streamOrderB;
     }
 
-    return parsedA.streamNumber - parsedB.streamNumber;
+    return a.streamNumber - b.streamNumber;
   }
 
   private static async getJson<T = any>(url: string): Promise<{ statusCode: number; body: T | null }> {
