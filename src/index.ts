@@ -3,6 +3,7 @@ import { Action, BuildParameters, Cache, Orchestrator, Docker, ImageTag, Output 
 import { Cli } from './model/cli/cli';
 import MacBuilder from './model/mac-builder';
 import PlatformSetup from './model/platform-setup';
+import UnityImageResolver from './model/orchestrator/services/core/unity-image-resolver';
 
 async function runMain() {
   try {
@@ -24,10 +25,14 @@ async function runMain() {
     if (buildParameters.providerStrategy === 'local') {
       core.info('Building locally');
       await PlatformSetup.setup(buildParameters, actionFolder);
+      const resolvedImage = await UnityImageResolver.resolveImage(buildParameters, baseImage.toString());
+      if (buildParameters.editorVersion !== resolvedImage.editorVersion) {
+        buildParameters.editorVersion = resolvedImage.editorVersion;
+      }
       exitCode =
         process.platform === 'darwin'
           ? await MacBuilder.run(actionFolder)
-          : await Docker.run(baseImage.toString(), {
+          : await Docker.run(resolvedImage.image, {
               workspace,
               actionFolder,
               ...buildParameters,
