@@ -34,6 +34,7 @@ class UnityImageResolver {
   private static readonly maxPagesExact = 2;
   private static readonly maxPagesMinor = 10;
   private static readonly maxPagesMajor = 20;
+  private static readonly maxPagesBroad = 500;
   private static readonly streamOrder: Record<string, number> = {
     a: 0,
     b: 1,
@@ -121,8 +122,20 @@ class UnityImageResolver {
       return cached;
     }
 
-    const url = `https://hub.docker.com/v2/repositories/${repository}/tags/${encodeURIComponent(tag)}`;
-    const response = await this.getJson(url);
+    let response: { statusCode: number; body: any | null };
+    try {
+      const url = `https://hub.docker.com/v2/repositories/${repository}/tags/${encodeURIComponent(tag)}`;
+      response = await this.getJson(url);
+    } catch (error: any) {
+      if (this.isTimeoutError(error)) {
+        OrchestratorLogger.log(
+          `Timed out while checking ${repository}:${tag}; treating as missing and continuing with fallback lookup`,
+        );
+        this.tagExistsCache.set(cacheKey, false);
+        return false;
+      }
+      throw error;
+    }
 
     if (response.statusCode === 404) {
       this.tagExistsCache.set(cacheKey, false);
@@ -161,9 +174,10 @@ class UnityImageResolver {
       { filter: `${platformPrefix}-${requested.major}.${requested.minor}.`, maxPages: this.maxPagesMinor },
       { filter: `${platformPrefix}-${requested.major}.`, maxPages: this.maxPagesMajor },
     ];
+    let hadTimeout = false;
 
     for (const context of contexts) {
-      const contextVersions = await this.listMatchingUnityVersionsForFilter(
+      const contextResult = await this.listMatchingUnityVersionsForFilter(
         repository,
         platformPrefix,
         builderPlatform,
@@ -171,7 +185,25 @@ class UnityImageResolver {
         context.filter,
         context.maxPages,
       );
-      for (const version of contextVersions) {
+      for (const version of contextResult.versions) {
+        versions.add(version);
+      }
+      hadTimeout = hadTimeout || contextResult.timedOut;
+    }
+
+    if (hadTimeout || versions.size === 0) {
+      OrchestratorLogger.log(
+        `Falling back to broad tag scan for ${repository} because filtered lookup ${
+          hadTimeout ? 'timed out' : 'found no matches'
+        }`,
+      );
+      const broadVersions = await this.listMatchingUnityVersionsBroad(
+        repository,
+        platformPrefix,
+        builderPlatform,
+        rollingVersion,
+      );
+      for (const version of broadVersions) {
         versions.add(version);
       }
     }
@@ -188,16 +220,87 @@ class UnityImageResolver {
     rollingVersion: number,
     nameFilter: string,
     maxPages: number,
-  ): Promise<string[]> {
+  ): Promise<{ versions: string[]; timedOut: boolean }> {
     const versions = new Set<string>();
     let url: string | null = `https://hub.docker.com/v2/repositories/${repository}/tags?page_size=100&name=${encodeURIComponent(
       nameFilter,
     )}`;
     let pagesRead = 0;
+    let timedOut = false;
 
     while (url && pagesRead < maxPages) {
-      const response: { statusCode: number; body: DockerHubTagListResponse | null } =
-        await this.getJson<DockerHubTagListResponse>(url);
+      let response: { statusCode: number; body: DockerHubTagListResponse | null };
+      try {
+        response = await this.getJson<DockerHubTagListResponse>(url);
+      } catch (error: any) {
+        if (this.isTimeoutError(error)) {
+          timedOut = true;
+          break;
+        }
+        throw error;
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300 || !response.body) {
+        throw new Error(`Failed to list Docker Hub tags for ${repository} (HTTP ${response.statusCode})`);
+      }
+
+      for (const result of response.body.results || []) {
+        const parsed = this.parseUnityImageTag(result.name);
+        if (!parsed) {
+          continue;
+        }
+
+        if (
+          parsed.platformPrefix === platformPrefix &&
+          parsed.builderPlatform === builderPlatform &&
+          parsed.rollingVersion === rollingVersion
+        ) {
+          versions.add(parsed.editorVersion);
+        }
+      }
+
+      url = response.body.next;
+      pagesRead += 1;
+    }
+
+    if (url && !timedOut) {
+      OrchestratorLogger.log(
+        `Unity image lookup reached page limit (${maxPages}) while scanning ${repository} with filter ${nameFilter}`,
+      );
+    }
+
+    if (timedOut) {
+      OrchestratorLogger.log(
+        `Unity image lookup timed out while scanning ${repository} with filter ${nameFilter}; treating as no result`,
+      );
+    }
+
+    return { versions: [...versions], timedOut };
+  }
+
+  private static async listMatchingUnityVersionsBroad(
+    repository: string,
+    platformPrefix: string,
+    builderPlatform: string,
+    rollingVersion: number,
+  ): Promise<string[]> {
+    const versions = new Set<string>();
+    let url: string | null = `https://hub.docker.com/v2/repositories/${repository}/tags?page_size=100`;
+    let pagesRead = 0;
+
+    while (url && pagesRead < this.maxPagesBroad) {
+      let response: { statusCode: number; body: DockerHubTagListResponse | null };
+      try {
+        response = await this.getJson<DockerHubTagListResponse>(url);
+      } catch (error: any) {
+        if (this.isTimeoutError(error)) {
+          OrchestratorLogger.log(
+            `Unity image broad lookup timed out for ${repository}; using collected candidates so far`,
+          );
+          break;
+        }
+        throw error;
+      }
+
       if (response.statusCode < 200 || response.statusCode >= 300 || !response.body) {
         throw new Error(`Failed to list Docker Hub tags for ${repository} (HTTP ${response.statusCode})`);
       }
@@ -223,7 +326,7 @@ class UnityImageResolver {
 
     if (url) {
       OrchestratorLogger.log(
-        `Unity image lookup reached page limit (${maxPages}) while scanning ${repository} with filter ${nameFilter}`,
+        `Unity image broad lookup reached page limit (${this.maxPagesBroad}) while scanning ${repository}`,
       );
     }
 
@@ -319,6 +422,11 @@ class UnityImageResolver {
     }
 
     return a.streamNumber - b.streamNumber;
+  }
+
+  private static isTimeoutError(error: any): boolean {
+    const message = `${error?.message || error}`;
+    return message.includes('Request timeout');
   }
 
   private static async getJson<T = any>(url: string): Promise<{ statusCode: number; body: T | null }> {
