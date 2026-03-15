@@ -4,6 +4,7 @@ import https from 'node:https';
 import { IncomingHttpHeaders } from 'node:http';
 
 type DockerHubTagListResponse = {
+  count: number;
   next: string | null;
   results: Array<{ name: string }>;
 };
@@ -29,13 +30,13 @@ type ParsedImageReference = {
   parsedTag: ParsedUnityImageTag;
 };
 
+type LookupScope = 'sameMinor' | 'sameMajor' | 'anyLower';
+type LookupSelectionMode = 'best' | 'first';
+
 class UnityImageResolver {
+  private static readonly dockerHubPageSize = 100;
   private static readonly requestTimeoutMs = 4_000;
   private static readonly rateLimitPauseMs = 60_000;
-  private static readonly maxPagesExact = 2;
-  private static readonly maxPagesMinor = 10;
-  private static readonly maxPagesMajor = 20;
-  private static readonly maxPagesBroad = 500;
   private static readonly streamOrder: Record<string, number> = {
     a: 0,
     b: 1,
@@ -177,14 +178,25 @@ class UnityImageResolver {
       return [];
     }
 
-    const versions = new Set<string>();
     const contexts = [
-      { filter: requestedVersion, maxPages: this.maxPagesExact },
-      { filter: `${requested.major}.${requested.minor}`, maxPages: this.maxPagesMinor },
-      { filter: `${requested.major}`, maxPages: this.maxPagesMajor },
-      { filter: `${platformPrefix}-${requestedVersion}`, maxPages: this.maxPagesExact },
-      { filter: `${platformPrefix}-${requested.major}.${requested.minor}`, maxPages: this.maxPagesMinor },
-      { filter: `${platformPrefix}-${requested.major}`, maxPages: this.maxPagesMajor },
+      { filter: requestedVersion, scope: 'sameMinor' as LookupScope, mode: 'best' as LookupSelectionMode },
+      {
+        filter: `${requested.major}.${requested.minor}`,
+        scope: 'sameMinor' as LookupScope,
+        mode: 'best' as LookupSelectionMode,
+      },
+      { filter: `${requested.major}`, scope: 'sameMajor' as LookupScope, mode: 'first' as LookupSelectionMode },
+      {
+        filter: `${platformPrefix}-${requestedVersion}`,
+        scope: 'sameMinor' as LookupScope,
+        mode: 'first' as LookupSelectionMode,
+      },
+      {
+        filter: `${platformPrefix}-${requested.major}.${requested.minor}`,
+        scope: 'sameMinor' as LookupScope,
+        mode: 'first' as LookupSelectionMode,
+      },
+      { filter: `${platformPrefix}-${requested.major}`, scope: 'sameMajor' as LookupScope, mode: 'first' as LookupSelectionMode },
     ];
     let hadTimeout = false;
 
@@ -195,34 +207,38 @@ class UnityImageResolver {
         builderPlatform,
         rollingVersion,
         context.filter,
-        context.maxPages,
+        requested,
+        context.scope,
+        context.mode,
       );
-      for (const version of contextResult.versions) {
-        versions.add(version);
+      if (contextResult.bestVersion) {
+        const resolved = [contextResult.bestVersion];
+        this.versionCache.set(cacheKey, resolved);
+        return resolved;
       }
       hadTimeout = hadTimeout || contextResult.timedOut;
     }
 
-    if (hadTimeout || versions.size === 0) {
+    if (hadTimeout) {
       OrchestratorLogger.log(
-        `Falling back to broad tag scan for ${repository} because filtered lookup ${
-          hadTimeout ? 'timed out' : 'found no matches'
-        }`,
+        `Falling back to broad tag scan for ${repository} because filtered lookup timed out or was rate-limited`,
       );
-      const broadVersions = await this.listMatchingUnityVersionsBroad(
+      const broadVersion = await this.listMatchingUnityVersionsBroad(
         repository,
         platformPrefix,
         builderPlatform,
         rollingVersion,
+        requested,
       );
-      for (const version of broadVersions) {
-        versions.add(version);
+      if (broadVersion) {
+        const resolved = [broadVersion];
+        this.versionCache.set(cacheKey, resolved);
+        return resolved;
       }
     }
 
-    const collected = [...versions];
-    this.versionCache.set(cacheKey, collected);
-    return collected;
+    this.versionCache.set(cacheKey, []);
+    return [];
   }
 
   private static async listMatchingUnityVersionsForFilter(
@@ -231,16 +247,20 @@ class UnityImageResolver {
     builderPlatform: string,
     rollingVersion: number,
     nameFilter: string,
-    maxPages: number,
-  ): Promise<{ versions: string[]; timedOut: boolean }> {
-    const versions = new Set<string>();
-    let url: string | null = `https://hub.docker.com/v2/repositories/${repository}/tags?page_size=100&name=${encodeURIComponent(
-      nameFilter,
-    )}`;
+    requested: UnityVersionParts,
+    scope: LookupScope,
+    mode: LookupSelectionMode,
+  ): Promise<{ bestVersion: string | undefined; timedOut: boolean }> {
+    let bestVersion: string | undefined;
+    let bestParsed: UnityVersionParts | undefined;
+    let url: string | null = `https://hub.docker.com/v2/repositories/${repository}/tags?page_size=${
+      this.dockerHubPageSize
+    }&name=${encodeURIComponent(nameFilter)}`;
     let pagesRead = 0;
+    let totalPages = Number.POSITIVE_INFINITY;
     let timedOut = false;
 
-    while (url && pagesRead < maxPages) {
+    while (url && pagesRead < totalPages) {
       let response: { statusCode: number; body: DockerHubTagListResponse | null };
       try {
         response = await this.getJson<DockerHubTagListResponse>(url);
@@ -264,6 +284,9 @@ class UnityImageResolver {
       if (response.statusCode < 200 || response.statusCode >= 300 || !response.body) {
         throw new Error(`Failed to list Docker Hub tags for ${repository} (HTTP ${response.statusCode})`);
       }
+      if (Number.isFinite(response.body.count)) {
+        totalPages = Math.max(1, Math.ceil(response.body.count / this.dockerHubPageSize));
+      }
 
       for (const result of response.body.results || []) {
         const parsed = this.parseUnityImageTag(result.name);
@@ -276,17 +299,32 @@ class UnityImageResolver {
           parsed.builderPlatform === builderPlatform &&
           parsed.rollingVersion === rollingVersion
         ) {
-          versions.add(parsed.editorVersion);
+          const candidateParsed = this.parseUnityVersion(parsed.editorVersion);
+          if (!candidateParsed) {
+            continue;
+          }
+          if (!this.isCandidateInScope(candidateParsed, requested, scope)) {
+            continue;
+          }
+          if (!bestParsed || this.compareUnityVersionParts(candidateParsed, bestParsed) > 0) {
+            bestParsed = candidateParsed;
+            bestVersion = parsed.editorVersion;
+          }
         }
+      }
+
+      // In first-fit mode, stop at first page with a valid candidate.
+      if (bestVersion && mode === 'first') {
+        return { bestVersion, timedOut: false };
       }
 
       url = response.body.next;
       pagesRead += 1;
     }
 
-    if (url && !timedOut) {
+    if (url && !timedOut && Number.isFinite(totalPages)) {
       OrchestratorLogger.log(
-        `Unity image lookup reached page limit (${maxPages}) while scanning ${repository} with filter ${nameFilter}`,
+        `Unity image lookup reached count-derived page limit (${totalPages}) while scanning ${repository} with filter ${nameFilter}`,
       );
     }
 
@@ -296,7 +334,7 @@ class UnityImageResolver {
       );
     }
 
-    return { versions: [...versions], timedOut };
+    return { bestVersion, timedOut };
   }
 
   private static async listMatchingUnityVersionsBroad(
@@ -304,12 +342,15 @@ class UnityImageResolver {
     platformPrefix: string,
     builderPlatform: string,
     rollingVersion: number,
-  ): Promise<string[]> {
-    const versions = new Set<string>();
-    let url: string | null = `https://hub.docker.com/v2/repositories/${repository}/tags?page_size=100`;
+    requested: UnityVersionParts,
+  ): Promise<string | undefined> {
+    let bestVersion: string | undefined;
+    let bestParsed: UnityVersionParts | undefined;
+    let url: string | null = `https://hub.docker.com/v2/repositories/${repository}/tags?page_size=${this.dockerHubPageSize}`;
     let pagesRead = 0;
+    let totalPages = Number.POSITIVE_INFINITY;
 
-    while (url && pagesRead < this.maxPagesBroad) {
+    while (url && pagesRead < totalPages) {
       let response: { statusCode: number; body: DockerHubTagListResponse | null };
       try {
         response = await this.getJson<DockerHubTagListResponse>(url);
@@ -333,6 +374,9 @@ class UnityImageResolver {
       if (response.statusCode < 200 || response.statusCode >= 300 || !response.body) {
         throw new Error(`Failed to list Docker Hub tags for ${repository} (HTTP ${response.statusCode})`);
       }
+      if (Number.isFinite(response.body.count)) {
+        totalPages = Math.max(1, Math.ceil(response.body.count / this.dockerHubPageSize));
+      }
 
       for (const result of response.body.results || []) {
         const parsed = this.parseUnityImageTag(result.name);
@@ -345,21 +389,35 @@ class UnityImageResolver {
           parsed.builderPlatform === builderPlatform &&
           parsed.rollingVersion === rollingVersion
         ) {
-          versions.add(parsed.editorVersion);
+          const candidateParsed = this.parseUnityVersion(parsed.editorVersion);
+          if (!candidateParsed) {
+            continue;
+          }
+          if (!this.isCandidateInScope(candidateParsed, requested, 'anyLower')) {
+            continue;
+          }
+          if (!bestParsed || this.compareUnityVersionParts(candidateParsed, bestParsed) > 0) {
+            bestParsed = candidateParsed;
+            bestVersion = parsed.editorVersion;
+          }
         }
+      }
+
+      if (bestVersion) {
+        return bestVersion;
       }
 
       url = response.body.next;
       pagesRead += 1;
     }
 
-    if (url) {
+    if (url && Number.isFinite(totalPages)) {
       OrchestratorLogger.log(
-        `Unity image broad lookup reached page limit (${this.maxPagesBroad}) while scanning ${repository}`,
+        `Unity image broad lookup reached count-derived page limit (${totalPages}) while scanning ${repository}`,
       );
     }
 
-    return [...versions];
+    return bestVersion;
   }
 
   private static composeTag(
@@ -453,6 +511,27 @@ class UnityImageResolver {
     return a.streamNumber - b.streamNumber;
   }
 
+  private static isCandidateInScope(
+    candidate: UnityVersionParts,
+    requested: UnityVersionParts,
+    scope: LookupScope,
+  ): boolean {
+    if (this.compareUnityVersionParts(candidate, requested) >= 0) {
+      return false;
+    }
+
+    switch (scope) {
+      case 'sameMinor':
+        return candidate.major === requested.major && candidate.minor === requested.minor;
+      case 'sameMajor':
+        return candidate.major === requested.major;
+      case 'anyLower':
+        return true;
+      default:
+        return false;
+    }
+  }
+
   private static isTimeoutError(error: any): boolean {
     const message = `${error?.message || error}`;
     return message.includes('Request timeout');
@@ -461,10 +540,6 @@ class UnityImageResolver {
   private static isRateLimitError(error: any): boolean {
     const message = `${error?.message || error}`;
     return message.includes('Rate limited') || message.includes('HTTP 429');
-  }
-
-  private static isRetriableLookupError(error: any): boolean {
-    return this.isTimeoutError(error) || this.isRateLimitError(error);
   }
 
   private static async getJson<T = any>(url: string): Promise<{ statusCode: number; body: T | null }> {
