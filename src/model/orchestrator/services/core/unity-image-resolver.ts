@@ -131,7 +131,9 @@ class UnityImageResolver {
     } catch (error: any) {
       if (this.isRateLimitError(error)) {
         OrchestratorLogger.log(
-          `Rate limited while checking ${repository}:${tag}. Waiting ${this.rateLimitPauseMs / 1000}s before continuing`,
+          `Rate limited while checking ${repository}:${tag}. Waiting ${
+            this.rateLimitPauseMs / 1000
+          }s before continuing`,
         );
         await this.sleep(this.rateLimitPauseMs);
         this.tagExistsCache.set(cacheKey, false);
@@ -196,7 +198,11 @@ class UnityImageResolver {
         scope: 'sameMinor' as LookupScope,
         mode: 'first' as LookupSelectionMode,
       },
-      { filter: `${platformPrefix}-${requested.major}`, scope: 'sameMajor' as LookupScope, mode: 'first' as LookupSelectionMode },
+      {
+        filter: `${platformPrefix}-${requested.major}`,
+        scope: 'sameMajor' as LookupScope,
+        mode: 'first' as LookupSelectionMode,
+      },
     ];
     let hadTimeout = false;
 
@@ -346,7 +352,9 @@ class UnityImageResolver {
   ): Promise<string | undefined> {
     let bestVersion: string | undefined;
     let bestParsed: UnityVersionParts | undefined;
-    let url: string | null = `https://hub.docker.com/v2/repositories/${repository}/tags?page_size=${this.dockerHubPageSize}`;
+    let url:
+      | string
+      | null = `https://hub.docker.com/v2/repositories/${repository}/tags?page_size=${this.dockerHubPageSize}`;
     let pagesRead = 0;
     let totalPages = Number.POSITIVE_INFINITY;
 
@@ -357,7 +365,9 @@ class UnityImageResolver {
       } catch (error: any) {
         if (this.isRateLimitError(error)) {
           OrchestratorLogger.log(
-            `Rate limited during broad lookup for ${repository}. Waiting ${this.rateLimitPauseMs / 1000}s, then continuing with collected candidates`,
+            `Rate limited during broad lookup for ${repository}. Waiting ${
+              this.rateLimitPauseMs / 1000
+            }s, then continuing with collected candidates`,
           );
           await this.sleep(this.rateLimitPauseMs);
           break;
