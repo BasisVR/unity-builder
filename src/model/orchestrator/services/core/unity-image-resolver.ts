@@ -31,6 +31,7 @@ type ParsedImageReference = {
 
 class UnityImageResolver {
   private static readonly requestTimeoutMs = 4_000;
+  private static readonly rateLimitPauseMs = 60_000;
   private static readonly maxPagesExact = 2;
   private static readonly maxPagesMinor = 10;
   private static readonly maxPagesMajor = 20;
@@ -127,6 +128,14 @@ class UnityImageResolver {
       const url = `https://hub.docker.com/v2/repositories/${repository}/tags/${encodeURIComponent(tag)}`;
       response = await this.getJson(url);
     } catch (error: any) {
+      if (this.isRateLimitError(error)) {
+        OrchestratorLogger.log(
+          `Rate limited while checking ${repository}:${tag}. Waiting ${this.rateLimitPauseMs / 1000}s before continuing`,
+        );
+        await this.sleep(this.rateLimitPauseMs);
+        this.tagExistsCache.set(cacheKey, false);
+        return false;
+      }
       if (this.isTimeoutError(error)) {
         OrchestratorLogger.log(
           `Timed out while checking ${repository}:${tag}; treating as missing and continuing with fallback lookup`,
@@ -170,9 +179,12 @@ class UnityImageResolver {
 
     const versions = new Set<string>();
     const contexts = [
+      { filter: requestedVersion, maxPages: this.maxPagesExact },
+      { filter: `${requested.major}.${requested.minor}`, maxPages: this.maxPagesMinor },
+      { filter: `${requested.major}`, maxPages: this.maxPagesMajor },
       { filter: `${platformPrefix}-${requestedVersion}`, maxPages: this.maxPagesExact },
-      { filter: `${platformPrefix}-${requested.major}.${requested.minor}.`, maxPages: this.maxPagesMinor },
-      { filter: `${platformPrefix}-${requested.major}.`, maxPages: this.maxPagesMajor },
+      { filter: `${platformPrefix}-${requested.major}.${requested.minor}`, maxPages: this.maxPagesMinor },
+      { filter: `${platformPrefix}-${requested.major}`, maxPages: this.maxPagesMajor },
     ];
     let hadTimeout = false;
 
@@ -233,6 +245,16 @@ class UnityImageResolver {
       try {
         response = await this.getJson<DockerHubTagListResponse>(url);
       } catch (error: any) {
+        if (this.isRateLimitError(error)) {
+          OrchestratorLogger.log(
+            `Rate limited while scanning ${repository} with filter ${nameFilter}. Waiting ${
+              this.rateLimitPauseMs / 1000
+            }s, then continuing with next context`,
+          );
+          await this.sleep(this.rateLimitPauseMs);
+          timedOut = true;
+          break;
+        }
         if (this.isTimeoutError(error)) {
           timedOut = true;
           break;
@@ -270,7 +292,7 @@ class UnityImageResolver {
 
     if (timedOut) {
       OrchestratorLogger.log(
-        `Unity image lookup timed out while scanning ${repository} with filter ${nameFilter}; treating as no result`,
+        `Unity image lookup timed out or was rate-limited while scanning ${repository} with filter ${nameFilter}; treating as no result`,
       );
     }
 
@@ -292,6 +314,13 @@ class UnityImageResolver {
       try {
         response = await this.getJson<DockerHubTagListResponse>(url);
       } catch (error: any) {
+        if (this.isRateLimitError(error)) {
+          OrchestratorLogger.log(
+            `Rate limited during broad lookup for ${repository}. Waiting ${this.rateLimitPauseMs / 1000}s, then continuing with collected candidates`,
+          );
+          await this.sleep(this.rateLimitPauseMs);
+          break;
+        }
         if (this.isTimeoutError(error)) {
           OrchestratorLogger.log(
             `Unity image broad lookup timed out for ${repository}; using collected candidates so far`,
@@ -429,6 +458,15 @@ class UnityImageResolver {
     return message.includes('Request timeout');
   }
 
+  private static isRateLimitError(error: any): boolean {
+    const message = `${error?.message || error}`;
+    return message.includes('Rate limited') || message.includes('HTTP 429');
+  }
+
+  private static isRetriableLookupError(error: any): boolean {
+    return this.isTimeoutError(error) || this.isRateLimitError(error);
+  }
+
   private static async getJson<T = any>(url: string): Promise<{ statusCode: number; body: T | null }> {
     const response = await this.get(url);
     if (!response.body) {
@@ -482,6 +520,12 @@ class UnityImageResolver {
             return;
           }
 
+          if (statusCode === 429) {
+            response.resume();
+            reject(new Error(`Rate limited by Docker Hub for ${url} (HTTP 429)`));
+            return;
+          }
+
           let body = '';
           response.on('data', (chunk) => {
             body += chunk.toString();
@@ -499,6 +543,10 @@ class UnityImageResolver {
         reject(error);
       });
     });
+  }
+
+  private static async sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
 
