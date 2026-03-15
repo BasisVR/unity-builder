@@ -20,6 +20,7 @@ import { FollowLogStreamService } from './services/core/follow-log-stream-servic
 import OrchestratorResult from './services/core/orchestrator-result';
 import OrchestratorOptions from './options/orchestrator-options';
 import ResourceTracking from './services/core/resource-tracking';
+import UnityImageResolver from './services/core/unity-image-resolver';
 
 class Orchestrator {
   public static Provider: ProviderInterface;
@@ -182,6 +183,11 @@ class Orchestrator {
     if (baseImage.includes(`undefined`)) {
       throw new Error(`baseImage is undefined`);
     }
+    const resolvedImage = await UnityImageResolver.resolveImage(buildParameters, baseImage);
+    if (buildParameters.editorVersion !== resolvedImage.editorVersion) {
+      buildParameters.editorVersion = resolvedImage.editorVersion;
+    }
+
     await Orchestrator.setup(buildParameters);
 
     // When aws-local mode is enabled, validate AWS CloudFormation templates
@@ -220,7 +226,7 @@ class Orchestrator {
       await Orchestrator.updateStatusWithBuildParameters();
       const output = await new WorkflowCompositionRoot().run(
         new OrchestratorStepParameters(
-          baseImage,
+          resolvedImage.image,
           Orchestrator.orchestratorEnvironmentVariables,
           Orchestrator.defaultSecrets,
         ),
