@@ -24,41 +24,39 @@ Find the
 on the GameCI
 [documentation website](https://game.ci/docs).
 
-## BasisVR: Unity image version fallback (GameCI v6)
+## Unity editor image version fallback
 
-This fork preserves BasisVR's v4-style Docker image fallback on top of the
-upstream v6 CLI wrapper. When the exact official `unityci/editor` image is
-missing (Docker Hub returns HTTP 404), the action looks for the highest
-compatible **earlier Unity editor version**, preferring the same minor
-version, then the same major version. The Docker platform, build module and
-rolling image revision must match.
+For local Docker builds using official `unityci/*` editor images, the action
+checks whether the requested image tag exists on Docker Hub. If the tag
+returns HTTP 404, it searches for the closest **older compatible Unity
+editor version** in the same minor version, then the same major version.
+The Docker platform, build module, and image revision must match.
 
-The selected fallback is passed to `game-ci build` as **both**
-`--customImage` and `--engineVersion`, so the actual Unity editor
-version and Docker image stay consistent. The action keeps the requested
-version when the exact tag exists or when Docker Hub is unavailable; it
-does not silently downgrade on registry errors.
+The selected image and editor version are passed together to the
+`game-ci build` CLI as `--customImage` and `--engineVersion`.
+An existing tag is never replaced. Registry errors or unavailable lookup
+results leave the originally requested version unchanged.
 
-Fallback is automatic for locally executed Docker builds using an official
-`unityci/*` registry image. It is **not** applied to a supplied
-`customImage`, non-Docker/macOS builds, or `providerStrategy=local-system`.
-In particular, BasisVR's custom-built `basis-unity-editor` CI images are
-left unchanged.
+Fallback is skipped when `customImage` is set, when running on macOS,
+or for non-Docker providers such as `providerStrategy=local-system`.
+Custom-built editor images are therefore unaffected.
 
-Unity 6.6+ requires more shared memory than Docker's 64 MiB default.
-Upstream GameCI CLI defaults to `1025m`; you may explicitly configure
-`dockerShmSize: 2g` for extra headroom.
+## Docker shared memory
+
+The GameCI CLI defaults Docker shared memory to `1025m`. For projects
+that require more, set the `dockerShmSize` action input explicitly:
 
 ```yaml
-- uses: Toys0125/unity-builder@upgrade/game-ci-v6.0.0
+# After merging into BasisVR/unity-builder:
+- uses: BasisVR/unity-builder@main
   with:
-    projectPath: Basis
+    projectPath: MyUnityProject
     targetPlatform: StandaloneWindows64
     dockerShmSize: 2g
 ```
 
-The original upstream v6 action runs on Node 24 and downloads the
-`game-ci/cli` binary. These behaviors remain unchanged.
+The action continues to run on Node 24 and delegates builds to the
+`game-ci/cli` binary.
 
 ## Related actions
 

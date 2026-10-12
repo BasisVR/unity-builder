@@ -56,7 +56,7 @@ function opts(
   };
 }
 
-describe('BasisVR Unity editor image fallback on GameCI v6', () => {
+describe('Unity editor image fallback on GameCI v6', () => {
   it('does not query the registry when a custom image is supplied', async () => {
     const lookup = registry(() => {
       throw new Error('must not be called');

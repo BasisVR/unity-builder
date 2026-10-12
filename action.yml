@@ -12,7 +12,7 @@ inputs:
     description:
       'Version of unity to use for building the project. Use "auto" to get from your ProjectSettings/ProjectVersion.txt.
       Explicit values override project auto-detection. When the requested official unityci/editor tag is missing,
-      the BasisVR adapter selects the nearest older compatible image and adjusts the editor version accordingly.'
+      the image fallback selects the nearest older compatible image and adjusts the editor version accordingly.'
   cliVersion:
     required: false
     default: 'latest'

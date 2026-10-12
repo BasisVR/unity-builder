@@ -625,7 +625,7 @@ var __importStar = (this && this.__importStar) || function (mod) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.resolveUnityImageFallback = void 0;
 /**
- * BasisVR's Unity Editor Docker-tag fallback, adapted for GameCI v6.
+ * Unity Editor Docker-tag fallback for GameCI v6.
  *
  * The v6 action invokes game-ci/cli rather than constructing the Docker
  * command itself. When an official unityci/editor tag doesn't exist, resolve
@@ -699,7 +699,7 @@ async function getResponse(fetcher, url) {
     try {
         return await fetcher(url, {
             signal: controller.signal,
-            headers: { Accept: 'application/json', 'User-Agent': 'BasisVR-unity-builder' },
+            headers: { Accept: 'application/json', 'User-Agent': 'unity-builder-image-fallback' },
         });
     }
     finally {

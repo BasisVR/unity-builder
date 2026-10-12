@@ -1,5 +1,5 @@
 /**
- * BasisVR's Unity Editor Docker-tag fallback, adapted for GameCI v6.
+ * Unity Editor Docker-tag fallback for GameCI v6.
  *
  * The v6 action invokes game-ci/cli rather than constructing the Docker
  * command itself. When an official unityci/editor tag doesn't exist, resolve
@@ -112,7 +112,7 @@ async function getResponse(fetcher: typeof fetch, url: string): Promise<Response
   try {
     return await fetcher(url, {
       signal: controller.signal,
-      headers: { Accept: 'application/json', 'User-Agent': 'BasisVR-unity-builder' },
+      headers: { Accept: 'application/json', 'User-Agent': 'unity-builder-image-fallback' },
     });
   } finally {
     clearTimeout(timeout);
