@@ -12,15 +12,19 @@ jobs:
   buildForAllPlatformsWindows:
     name: ${{ matrix.targetPlatform }} on ${{ matrix.unityVersion }}
     runs-on: windows-2022
+    # See build-tests-mac.yml's matching comment - a per-step timeout doesn't
+    # bound an action's own implicit post-run cleanup step, only a job-level
+    # timeout does.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         projectPath:
           - test-project
         unityVersion:
-          - 2021.3.32f1
-          - 2022.3.13f1
-          - 2023.2.2f1
+          - 2021.3.45f2
+          - 2022.3.62f3
+          - 2023.2.22f1
         targetPlatform:
           - Android # Build an Android apk.
           - StandaloneWindows64 # Build a Windows 64-bit standalone.
@@ -39,7 +43,7 @@ jobs:
           - unityVersion: 6000.0.36f1
             targetPlatform: StandaloneWindows64
             buildProfile: 'Assets/Settings/Build Profiles/Sample Windows Build Profile.asset'
-  
+
     steps:
       ###########################
       #         Checkout        #
@@ -49,12 +53,20 @@ jobs:
           lfs: true
 
       ###########################
-      #          Cache          #
+      #     Cache (restore)     #
       ###########################
-      - uses: actions/cache@v4
+      # Split from the save side (below) rather than the combined
+      # actions/cache@v4: that action's implicit post-run save has been
+      # observed hanging indefinitely on GitHub-hosted runners, unrelated to
+      # the cache key itself. A per-step timeout doesn't bound an implicit
+      # post-run cleanup step, only an explicit step does - and caching is a
+      # pure optimization, so losing one save is far cheaper than a job
+      # stuck "in_progress" for well over an hour.
+      - uses: actions/cache/restore@v4
+        id: cache-restore
         with:
           path: ${{ matrix.projectPath }}/Library
-          key: Library-${{ matrix.projectPath }}-windows-${{ matrix.targetPlatform }}
+          key: Library-${{ matrix.projectPath }}-windows-${{ matrix.targetPlatform }}-${{ matrix.unityVersion }}-${{ matrix.buildProfile }}
           restore-keys: |
             Library-${{ matrix.projectPath }}-windows-
             Library-
@@ -67,6 +79,34 @@ jobs:
           Move-Item -Path "./test-project/ProjectSettings/ProjectSettingsIl2cpp.asset" -Destination "./test-project/ProjectSettings/ProjectSettings.asset" -Force
 
       ###########################
+      #    Docker Readiness     #
+      ###########################
+      - name: Ensure Docker daemon is ready
+        timeout-minutes: 2
+        shell: powershell
+        run: |
+          $maxRetries = 10
+          $retryDelay = 6
+          for ($i = 0; $i -lt $maxRetries; $i++) {
+            $svc = Get-Service docker -ErrorAction SilentlyContinue
+            if ($svc -and $svc.Status -eq 'Running') {
+              docker version 2>$null
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "Docker is ready."
+                exit 0
+              }
+            }
+            if ($svc -and $svc.Status -eq 'Stopped') {
+              Write-Host "Docker service stopped, attempting to start..."
+              Start-Service docker -ErrorAction SilentlyContinue
+            }
+            Write-Host "Waiting for Docker daemon (attempt $($i+1)/$maxRetries)..."
+            Start-Sleep -Seconds $retryDelay
+          }
+          Write-Error "Docker daemon did not start within $($maxRetries * $retryDelay) seconds"
+          exit 1
+
+      ###########################
       #          Build          #
       ###########################
       - name: Build
@@ -77,6 +117,7 @@ jobs:
         env:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
           UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
         with:
@@ -104,6 +145,7 @@ jobs:
         env:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
           UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
         with:
@@ -129,6 +171,7 @@ jobs:
         env:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           UNITY_SERIAL: ${{ secrets.UNITY_SERIAL }}
           UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
         with:
@@ -146,6 +189,24 @@ jobs:
       ###########################
       - uses: actions/upload-artifact@v4
         with:
-          name: Build ${{ matrix.targetPlatform }} on Windows (${{ matrix.unityVersion }})${{ matrix.enableGpu && ' With GPU' || '' }}${{ matrix.buildProfile && '  With Build Profile' || '' }}
+          name:
+            Build ${{ matrix.targetPlatform }} on Windows (${{ matrix.unityVersion }})${{ matrix.enableGpu && ' With
+            GPU' || '' }}${{ matrix.buildProfile && '  With Build Profile' || '' }}
           path: build
           retention-days: 14
+
+      ###########################
+      #      Cache (save)       #
+      ###########################
+      # A bounded, non-fatal step (unlike the combined action's implicit
+      # post-run save): a hang here is killed after 5m instead of stalling
+      # the whole job, and continue-on-error means a failed/timed-out save
+      # never fails the build - only a real cache miss on the next run,
+      # which is a much cheaper failure mode.
+      - if: steps.cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        timeout-minutes: 5
+        continue-on-error: true
+        with:
+          path: ${{ matrix.projectPath }}/Library
+          key: ${{ steps.cache-restore.outputs.cache-primary-key }}
