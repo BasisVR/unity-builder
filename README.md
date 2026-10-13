@@ -24,6 +24,40 @@ Find the
 on the GameCI
 [documentation website](https://game.ci/docs).
 
+## Unity editor image version fallback
+
+For local Docker builds using official `unityci/*` editor images, the action
+checks whether the requested image tag exists on Docker Hub. If the tag
+returns HTTP 404, it searches for the closest **older compatible Unity
+editor version** in the same minor version, then the same major version.
+The Docker platform, build module, and image revision must match.
+
+The selected image and editor version are passed together to the
+`game-ci build` CLI as `--customImage` and `--engineVersion`.
+An existing tag is never replaced. Registry errors or unavailable lookup
+results leave the originally requested version unchanged.
+
+Fallback is skipped when `customImage` is set, when running on macOS,
+or for non-Docker providers such as `providerStrategy=local-system`.
+Custom-built editor images are therefore unaffected.
+
+## Docker shared memory
+
+The GameCI CLI defaults Docker shared memory to `1025m`. For projects
+that require more, set the `dockerShmSize` action input explicitly:
+
+```yaml
+# After merging into BasisVR/unity-builder:
+- uses: BasisVR/unity-builder@main
+  with:
+    projectPath: MyUnityProject
+    targetPlatform: StandaloneWindows64
+    dockerShmSize: 2g
+```
+
+The action continues to run on Node 24 and delegates builds to the
+`game-ci/cli` binary.
+
 ## Related actions
 
 Visit the

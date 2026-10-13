@@ -1,3 +1,0 @@
-// Jest Snapshot v1, https://goo.gl/fbAQLP
-
-exports[`Versioning determineBuildVersion throws for invalid strategy somethingRandom 1`] = `"Versioning strategy should be one of None, Semantic, Tag, Custom."`;
